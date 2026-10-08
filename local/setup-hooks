@@ -1,0 +1,13 @@
+#!/bin/fish
+
+cd (git rev-parse --show-toplevel)
+
+set source (pwd)/local/hooks
+
+for hook in "$source"/*
+	if test -f $hook
+		set hook_basename (basename $hook)
+		echo "Configuring hook "$hook_basename"."
+		ln -sf "$hook" ".git/hooks/$hook_basename"
+	end
+end

@@ -1,0 +1,114 @@
+#!/bin/fish
+
+set msg_file $argv[1]
+if test -z "$msg_file"
+	echo "[commit-msg hook] Error: No commit message file provided."
+	exit 1
+end
+
+if not test -f "$msg_file"
+	echo "[commit-msg hook] Error: Commit message file '$msg_file' not found."
+	exit 1
+end
+
+# Determine Git comment character (defaults to '#')
+set comment_char (git config --get core.commentChar 2>/dev/null)
+if test -z "$comment_char" -o "$comment_char" = "auto"
+	set comment_char "#"
+end
+
+# Read lines and strip comments
+set lines
+while read -l line
+	set trimmed_line (string trim --left -- "$line")
+	if not string match -q "$comment_char*" -- "$trimmed_line"
+		set -a lines "$line"
+	end
+end < "$msg_file"
+
+# Trim leading empty lines
+while test (count $lines) -gt 0; and test -z (string trim -- "$lines[1]")
+	set -e lines[1]
+end
+
+# Trim trailing empty lines
+while test (count $lines) -gt 0; and test -z (string trim -- "$lines[-1]")
+	set -e lines[-1]
+end
+
+# If empty, let git handle empty commit message abort
+if test (count $lines) -eq 0
+	exit 0
+end
+
+set subject "$lines[1]"
+
+# Allow automated Git merge, revert, or rebase fixup/squash commits
+if string match -rq '^Merge ' -- "$subject"
+	exit 0
+end
+if string match -rq '^Revert "' -- "$subject"
+	exit 0
+end
+if string match -rq '^(fixup|squash)! ' -- "$subject"
+	exit 0
+end
+
+# Conventional Commits 1.0 validation:
+# <type>[optional scope][optional !]: <description>
+set valid_types "feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert"
+set cc_regex "^($valid_types)(\([^()\r\n]+\))?!?: [^\r\n]+"
+
+if not string match -rq -- "$cc_regex" "$subject"
+	echo ""
+	echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	echo "  [commit-msg hook] Error: Invalid Conventional Commit message"
+	echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	echo ""
+	echo "  Your subject:"
+	echo "    $subject"
+	echo ""
+	echo "  Expected format (Conventional Commits 1.0):"
+	echo "    <type>(<scope>): <description>"
+	echo "    <type>: <description>"
+	echo "    <type>(<scope>)!: <description>  (for breaking changes)"
+	echo ""
+	echo "  Valid types:"
+	echo "    feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert"
+	echo ""
+	echo "  Examples:"
+	echo "    feat(channel): implement bounded sender and receiver"
+	echo "    fix: ensure receiver wakes up upon sender disconnection"
+	echo "    docs: add documentation for channel permits"
+	echo "    chore(deps): update cargo dependencies"
+	echo "    feat!: redesign channel buffer interface"
+	echo ""
+	exit 1
+end
+
+# Conventional Commits 1.0 requires a blank line between the subject and body
+if test (count $lines) -gt 1
+	set second_line (string trim -- "$lines[2]")
+	if test -n "$second_line"
+		echo ""
+		echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+		echo "  [commit-msg hook] Error: Missing blank line between subject & body"
+		echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+		echo ""
+		echo "  Conventional Commits 1.0 requires a blank line separating the"
+		echo "  subject line and the commit body."
+		echo ""
+		echo "  Current lines:"
+		echo "    1: $lines[1]"
+		echo "    2: $lines[2]"
+		echo ""
+		echo "  Expected format:"
+		echo "    1: $lines[1]"
+		echo "    2:"
+		echo "    3: $lines[2]"
+		echo ""
+		exit 1
+	end
+end
+
+exit 0

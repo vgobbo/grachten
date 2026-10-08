@@ -1,0 +1,7 @@
+[package]
+description = "A simple MPSC channel implementation, similar in interface to Tokio's implementation, for learning purposes"
+edition = "2024"
+name = "grachten"
+version = "0.0.0-NEXT"
+
+[dependencies]

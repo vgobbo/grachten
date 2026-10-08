@@ -1,0 +1,3 @@
+#!/bin/bash
+
+fish `git rev-parse --show-toplevel`/local/hooks/impl/commit-msg "$@"

@@ -1,0 +1,25 @@
+#!/bin/fish
+
+set REPO_ROOT_DIR (git rev-parse --show-toplevel)
+
+# Format Rust files.
+set files (git diff --cached --name-only --diff-filter=ACMR | grep -Ei '\.rs$')
+if test (count $files) -gt 0
+	if not cargo clippy --fix --allow-dirty --allow-staged --no-deps -- -Dwarnings
+		exit 1
+	end
+
+	cargo +nightly fmt
+	for file in $files
+		git add "$file"
+	end
+end
+
+# Format Toml files.
+set files (git diff --cached --name-only --diff-filter=ACMR | grep -Ei '\.toml$')
+if test (count $files) -gt 0
+	taplo fmt
+	for file in $files
+		git add "$file"
+	end
+end

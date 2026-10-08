@@ -1,0 +1,38 @@
+#!/bin/fish
+
+function __target_base
+	set dirs '/var/tmp' '/tmp'
+	set mnt_types 'zram' 'tmpfs'
+	for dir in $dirs
+		for mnt in $mnt_types
+			if mount | grep $dir | grep -q $mnt
+				echo $dir
+				return 0
+			end
+		end
+	end
+
+	echo '/tmp'
+	return 0
+end
+
+function __setup_link
+	set source $argv[1]
+	set target_base (__target_base)
+
+	if not test -L "$source"
+			or not test -d "$source"
+
+		rm -rf "$source"
+
+		set target (mktemp -p "$target_base" -d "$USER.XXXXXXXXX")
+		ln -s "$target" "$source"
+		echo "$source redirected to $target."
+	else
+		echo "$source already created and is already a symlink."
+	end
+end
+
+set START (git rev-parse --show-toplevel)
+
+__setup_link "$START/target"
