@@ -177,7 +177,9 @@ where
 {
 	assert!(n > 0);
 
-	let buffer: Vec<_> = (0..n)
+	let buffer_capacity = n.next_power_of_two();
+
+	let buffer: Vec<_> = (0..buffer_capacity)
 		.map(|_| Entry { state: State::new(STATE_FREE), value: UnsafeCell::new(MaybeUninit::uninit()) })
 		.collect();
 
