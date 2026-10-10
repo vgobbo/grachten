@@ -92,7 +92,7 @@ where
 	T: Send,
 {
 	fn drop(&mut self) {
-		if self.shared.tx_count.fetch_sub(1, Ordering::Relaxed) == 0 {
+		if self.shared.tx_count.fetch_sub(1, Ordering::Relaxed) == 1 {
 			self.shared.rx_sem.close();
 		}
 	}
