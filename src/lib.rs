@@ -1,6 +1,6 @@
 use std::cell::UnsafeCell;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::{mem::MaybeUninit, sync::Arc};
 
 use tokio::sync::Semaphore;
 
@@ -12,7 +12,6 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Clone)]
-#[allow(unused)]
 pub struct Tx<T>
 where
 	T: Send + Sync,
@@ -20,7 +19,6 @@ where
 	shared: Arc<Shared<T>>,
 }
 
-#[allow(unused)]
 pub struct Rx<T>
 where
 	T: Send + Sync,
@@ -28,12 +26,11 @@ where
 	shared: Arc<Shared<T>>,
 }
 
-#[allow(unused)]
 struct Shared<T>
 where
 	T: Send + Sync,
 {
-	buffer: Vec<UnsafeCell<MaybeUninit<T>>>,
+	buffer: Vec<UnsafeCell<Option<T>>>,
 	buffer_head: AtomicUsize,
 	buffer_tail: AtomicUsize,
 	tx_sem: Semaphore,
@@ -53,9 +50,9 @@ where
 		let index = self.shared.buffer_tail.fetch_add(1, Ordering::Release);
 		let index = index % self.shared.buffer.len();
 
-		let ptr: *mut MaybeUninit<T> = self.shared.buffer[index].get();
+		let ptr: *mut Option<T> = self.shared.buffer[index].get();
 		unsafe {
-			*ptr = MaybeUninit::new(datum);
+			*ptr = Some(datum);
 		}
 
 		permit.forget();
@@ -75,17 +72,18 @@ where
 		let index = self.shared.buffer_head.fetch_add(1, Ordering::Acquire);
 		let index = index % self.shared.buffer.len();
 
-		let ptr: *mut MaybeUninit<T> = self.shared.buffer[index].get();
-		let datum = unsafe {
-			let datum = (*ptr).assume_init_read();
-			*ptr = MaybeUninit::uninit();
-			datum
-		};
+		loop {
+			let ptr: *mut Option<T> = self.shared.buffer[index].get();
+			let datum_opt = unsafe { (*ptr).take() };
+			if let Some(datum) = datum_opt {
+				permit.forget();
+				self.shared.tx_sem.add_permits(1);
 
-		permit.forget();
-		self.shared.tx_sem.add_permits(1);
+				return Ok(datum);
+			}
 
-		Ok(datum)
+			tokio::task::yield_now().await;
+		}
 	}
 }
 
@@ -104,7 +102,7 @@ where
 {
 	assert!(n > 0);
 
-	let buffer: Vec<_> = (0..n).map(|_| UnsafeCell::new(MaybeUninit::uninit())).collect();
+	let buffer: Vec<_> = (0..n).map(|_| UnsafeCell::new(None)).collect();
 
 	let shared = Shared {
 		buffer,
