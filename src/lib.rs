@@ -39,7 +39,6 @@ where
 }
 
 unsafe impl<T: Send + Sync> Send for Shared<T> {}
-unsafe impl<T: Send + Sync> Sync for Shared<T> {}
 
 type State = AtomicU8;
 const STATE_FREE: u8 = 0;
