@@ -1,7 +1,7 @@
 use std::cell::UnsafeCell;
 use std::mem::MaybeUninit;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU32, AtomicUsize, Ordering};
 
 use tokio::sync::Semaphore;
 
@@ -12,7 +12,6 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Clone)]
 pub struct Tx<T>
 where
 	T: Send,
@@ -36,6 +35,7 @@ where
 	buffer_tail: AtomicUsize,
 	tx_sem: Semaphore,
 	rx_sem: Semaphore,
+	tx_count: AtomicU32,
 }
 
 unsafe impl<T: Send + Sync> Send for Shared<T> {}
@@ -74,6 +74,27 @@ where
 		self.shared.rx_sem.add_permits(1);
 
 		Ok(())
+	}
+}
+
+impl<T> Clone for Tx<T>
+where
+	T: Send,
+{
+	fn clone(&self) -> Self {
+		self.shared.tx_count.fetch_add(1, Ordering::Relaxed);
+		Self { shared: self.shared.clone() }
+	}
+}
+
+impl<T> Drop for Tx<T>
+where
+	T: Send,
+{
+	fn drop(&mut self) {
+		if self.shared.tx_count.fetch_sub(1, Ordering::Relaxed) == 0 {
+			self.shared.rx_sem.close();
+		}
 	}
 }
 
@@ -154,6 +175,7 @@ where
 		buffer_tail: AtomicUsize::new(0),
 		tx_sem: Semaphore::new(n),
 		rx_sem: Semaphore::new(0),
+		tx_count: AtomicU32::new(1),
 	};
 	let shared = Arc::new(shared);
 
