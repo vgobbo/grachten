@@ -61,7 +61,7 @@ where
 		let permit = self.shared.tx_sem.acquire().await.map_err(|_| Error::Closed)?;
 
 		let index = self.shared.buffer_tail.fetch_add(1, Ordering::Relaxed);
-		let index = index % self.shared.buffer.len();
+		let index = index & (self.shared.buffer.len() - 1);
 
 		let entry = &self.shared.buffer[index];
 
@@ -104,7 +104,7 @@ where
 	pub async fn recv(&mut self) -> Result<T> {
 		// only one consumer is allowed, so we can read once and increment only when we are certain.
 		let buffer_head = self.shared.buffer_head.load(Ordering::Acquire);
-		let index = buffer_head % self.shared.buffer.len();
+		let index = buffer_head & (self.shared.buffer.len() - 1);
 
 		loop {
 			let permit = self.shared.rx_sem.acquire().await.map_err(|_| Error::Closed)?;
@@ -173,7 +173,7 @@ where
 
 pub fn bounded<T>(n: usize) -> (Tx<T>, Rx<T>)
 where
-	T: Send + Sync,
+	T: Send,
 {
 	assert!(n > 0);
 
