@@ -1,6 +1,7 @@
 use std::cell::UnsafeCell;
+use std::mem::MaybeUninit;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 use tokio::sync::Semaphore;
 
@@ -30,7 +31,7 @@ struct Shared<T>
 where
 	T: Send + Sync,
 {
-	buffer: Vec<UnsafeCell<Option<T>>>,
+	buffer: Vec<UnsafeCell<Entry<T>>>,
 	buffer_head: AtomicUsize,
 	buffer_tail: AtomicUsize,
 	tx_sem: Semaphore,
@@ -39,6 +40,18 @@ where
 
 unsafe impl<T: Send + Sync> Send for Shared<T> {}
 unsafe impl<T: Send + Sync> Sync for Shared<T> {}
+
+type State = AtomicU8;
+const STATE_FREE: u8 = 0;
+const STATE_TAKEN: u8 = 1;
+
+struct Entry<T>
+where
+	T: Send + Sync,
+{
+	state: State,
+	value: MaybeUninit<T>,
+}
 
 impl<T> Tx<T>
 where
@@ -50,9 +63,10 @@ where
 		let index = self.shared.buffer_tail.fetch_add(1, Ordering::Release);
 		let index = index % self.shared.buffer.len();
 
-		let ptr: *mut Option<T> = self.shared.buffer[index].get();
+		let ptr: *mut Entry<T> = self.shared.buffer[index].get();
 		unsafe {
-			*ptr = Some(datum);
+			(*ptr).value = MaybeUninit::new(datum);
+			(*ptr).state.store(STATE_TAKEN, Ordering::Release);
 		}
 
 		permit.forget();
@@ -73,16 +87,26 @@ where
 		let index = index % self.shared.buffer.len();
 
 		loop {
-			let ptr: *mut Option<T> = self.shared.buffer[index].get();
-			let datum_opt = unsafe { (*ptr).take() };
-			if let Some(datum) = datum_opt {
-				permit.forget();
-				self.shared.tx_sem.add_permits(1);
+			let ptr: *mut Entry<T> = self.shared.buffer[index].get();
+			let datum = unsafe {
+				if (*ptr).state.load(Ordering::Acquire) == STATE_FREE {
+					// TODO Effective yield.
+					tokio::task::yield_now().await;
+					continue;
+				}
 
-				return Ok(datum);
-			}
+				let datum = (*ptr).value.assume_init_read();
+				(*ptr).value = MaybeUninit::uninit();
 
-			tokio::task::yield_now().await;
+				(*ptr).state.store(STATE_FREE, Ordering::Release);
+
+				datum
+			};
+
+			permit.forget();
+			self.shared.tx_sem.add_permits(1);
+
+			return Ok(datum);
 		}
 	}
 }
@@ -102,7 +126,9 @@ where
 {
 	assert!(n > 0);
 
-	let buffer: Vec<_> = (0..n).map(|_| UnsafeCell::new(None)).collect();
+	let buffer: Vec<_> = (0..n)
+		.map(|_| UnsafeCell::new(Entry { state: State::new(STATE_FREE), value: MaybeUninit::uninit() }))
+		.collect();
 
 	let shared = Shared {
 		buffer,
