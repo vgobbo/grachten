@@ -31,7 +31,7 @@ struct Shared<T>
 where
 	T: Send + Sync,
 {
-	buffer: Vec<UnsafeCell<Entry<T>>>,
+	buffer: Vec<Entry<T>>,
 	buffer_head: AtomicUsize,
 	buffer_tail: AtomicUsize,
 	tx_sem: Semaphore,
@@ -50,7 +50,7 @@ where
 	T: Send + Sync,
 {
 	state: State,
-	value: MaybeUninit<T>,
+	value: UnsafeCell<MaybeUninit<T>>,
 }
 
 impl<T> Tx<T>
@@ -60,14 +60,16 @@ where
 	pub async fn send(&self, datum: T) -> Result<()> {
 		let permit = self.shared.tx_sem.acquire().await.map_err(|_| Error::Closed)?;
 
-		let index = self.shared.buffer_tail.fetch_add(1, Ordering::Release);
+		let index = self.shared.buffer_tail.fetch_add(1, Ordering::Relaxed);
 		let index = index % self.shared.buffer.len();
 
-		let ptr: *mut Entry<T> = self.shared.buffer[index].get();
+		let entry = &self.shared.buffer[index];
+
+		let ptr: *mut MaybeUninit<T> = entry.value.get();
 		unsafe {
-			(*ptr).value = MaybeUninit::new(datum);
-			(*ptr).state.store(STATE_TAKEN, Ordering::Release);
+			*ptr = MaybeUninit::new(datum);
 		}
+		entry.state.store(STATE_TAKEN, Ordering::Release);
 
 		permit.forget();
 		self.shared.rx_sem.add_permits(1);
@@ -80,28 +82,29 @@ impl<T> Rx<T>
 where
 	T: Send + Sync,
 {
-	pub async fn recv(&self) -> Result<T> {
+	pub async fn recv(&mut self) -> Result<T> {
 		let permit = self.shared.rx_sem.acquire().await.map_err(|_| Error::Closed)?;
 
 		let index = self.shared.buffer_head.fetch_add(1, Ordering::Acquire);
 		let index = index % self.shared.buffer.len();
 
 		loop {
-			let ptr: *mut Entry<T> = self.shared.buffer[index].get();
+			let entry = &self.shared.buffer[index];
+			if entry.state.load(Ordering::Acquire) == STATE_FREE {
+				// TODO Effective yield.
+				tokio::task::yield_now().await;
+				continue;
+			}
+
+			let ptr: *mut MaybeUninit<T> = entry.value.get();
 			let datum = unsafe {
-				if (*ptr).state.load(Ordering::Acquire) == STATE_FREE {
-					// TODO Effective yield.
-					tokio::task::yield_now().await;
-					continue;
-				}
-
-				let datum = (*ptr).value.assume_init_read();
-				(*ptr).value = MaybeUninit::uninit();
-
-				(*ptr).state.store(STATE_FREE, Ordering::Release);
+				let datum = (*ptr).assume_init_read();
+				*ptr = MaybeUninit::uninit();
 
 				datum
 			};
+
+			entry.state.store(STATE_FREE, Ordering::Release);
 
 			permit.forget();
 			self.shared.tx_sem.add_permits(1);
@@ -127,7 +130,7 @@ where
 	assert!(n > 0);
 
 	let buffer: Vec<_> = (0..n)
-		.map(|_| UnsafeCell::new(Entry { state: State::new(STATE_FREE), value: MaybeUninit::uninit() }))
+		.map(|_| Entry { state: State::new(STATE_FREE), value: UnsafeCell::new(MaybeUninit::uninit()) })
 		.collect();
 
 	let shared = Shared {
