@@ -15,21 +15,21 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Clone)]
 pub struct Tx<T>
 where
-	T: Send + Sync,
+	T: Send,
 {
 	shared: Arc<Shared<T>>,
 }
 
 pub struct Rx<T>
 where
-	T: Send + Sync,
+	T: Send,
 {
 	shared: Arc<Shared<T>>,
 }
 
 struct Shared<T>
 where
-	T: Send + Sync,
+	T: Send,
 {
 	buffer: Vec<Entry<T>>,
 	buffer_head: AtomicUsize,
@@ -47,7 +47,7 @@ const STATE_TAKEN: u8 = 1;
 
 struct Entry<T>
 where
-	T: Send + Sync,
+	T: Send,
 {
 	state: State,
 	value: UnsafeCell<MaybeUninit<T>>,
@@ -55,7 +55,7 @@ where
 
 impl<T> Tx<T>
 where
-	T: Send + Sync,
+	T: Send,
 {
 	pub async fn send(&self, datum: T) -> Result<()> {
 		let permit = self.shared.tx_sem.acquire().await.map_err(|_| Error::Closed)?;
@@ -80,7 +80,7 @@ where
 
 impl<T> Rx<T>
 where
-	T: Send + Sync,
+	T: Send,
 {
 	pub async fn recv(&mut self) -> Result<T> {
 		let permit = self.shared.rx_sem.acquire().await.map_err(|_| Error::Closed)?;
@@ -116,10 +116,26 @@ where
 
 impl<T> Drop for Rx<T>
 where
-	T: Send + Sync,
+	T: Send,
 {
 	fn drop(&mut self) {
 		self.shared.tx_sem.close();
+	}
+}
+
+impl<T> Drop for Shared<T>
+where
+	T: Send,
+{
+	fn drop(&mut self) {
+		for entry in &self.buffer {
+			if entry.state.load(Ordering::Relaxed) == STATE_TAKEN {
+				let ptr: *mut MaybeUninit<T> = entry.value.get();
+				unsafe {
+					(*ptr).assume_init_drop();
+				}
+			}
+		}
 	}
 }
 
