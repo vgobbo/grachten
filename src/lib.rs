@@ -92,9 +92,7 @@ where
 	T: Send,
 {
 	fn drop(&mut self) {
-		if self.shared.tx_count.fetch_sub(1, Ordering::Relaxed) == 1 {
-			self.shared.rx_sem.close();
-		}
+		self.shared.tx_count.fetch_sub(1, Ordering::Relaxed);
 	}
 }
 
@@ -106,13 +104,13 @@ where
 		loop {
 			let permit = self.shared.rx_sem.acquire().await.map_err(|_| Error::Closed)?;
 
-			let index_orig = self.shared.buffer_head.fetch_add(1, Ordering::Acquire);
-			let index = index_orig % self.shared.buffer.len();
+			let buffer_head = self.shared.buffer_head.fetch_add(1, Ordering::Acquire);
+			let index = buffer_head % self.shared.buffer.len();
 
 			let entry = &self.shared.buffer[index];
 			if entry.state.load(Ordering::Acquire) == STATE_FREE {
 				// undo stateful changes to make the operation cancellable.
-				self.shared.buffer_head.store(index_orig, Ordering::Release);
+				self.shared.buffer_head.store(buffer_head, Ordering::Release);
 				drop(permit);
 
 				// TODO Effective yield.
@@ -132,6 +130,13 @@ where
 
 			permit.forget();
 			self.shared.tx_sem.add_permits(1);
+
+			if self.shared.tx_count.load(Ordering::Relaxed) == 0 {
+				let buffer_tail = self.shared.buffer_tail.load(Ordering::Relaxed);
+				if buffer_head == buffer_tail {
+					self.shared.rx_sem.close();
+				}
+			}
 
 			return Ok(datum);
 		}
