@@ -38,7 +38,8 @@ where
 	tx_count: AtomicU32,
 }
 
-unsafe impl<T: Send + Sync> Send for Shared<T> {}
+unsafe impl<T: Send> Send for Shared<T> {}
+unsafe impl<T: Send> Sync for Shared<T> {}
 
 type State = AtomicU8;
 const STATE_FREE: u8 = 0;
@@ -101,22 +102,24 @@ where
 	T: Send,
 {
 	pub async fn recv(&mut self) -> Result<T> {
+		// only one consumer is allowed, so we can read once and increment only when we are certain.
+		let buffer_head = self.shared.buffer_head.load(Ordering::Acquire);
+		let index = buffer_head % self.shared.buffer.len();
+
 		loop {
 			let permit = self.shared.rx_sem.acquire().await.map_err(|_| Error::Closed)?;
 
-			let buffer_head = self.shared.buffer_head.fetch_add(1, Ordering::Acquire);
-			let index = buffer_head % self.shared.buffer.len();
-
 			let entry = &self.shared.buffer[index];
 			if entry.state.load(Ordering::Acquire) == STATE_FREE {
-				// undo stateful changes to make the operation cancellable.
-				self.shared.buffer_head.store(buffer_head, Ordering::Release);
+				// drop the permit, so it can be acquired again after yielding.
 				drop(permit);
 
 				// TODO Effective yield.
 				tokio::task::yield_now().await;
 				continue;
 			}
+
+			self.shared.buffer_head.store(buffer_head + 1, Ordering::Release);
 
 			let ptr: *mut MaybeUninit<T> = entry.value.get();
 			let datum = unsafe {
