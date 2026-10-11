@@ -44,6 +44,7 @@ unsafe impl<T: Send> Sync for Shared<T> {}
 type State = AtomicU8;
 const STATE_FREE: u8 = 0;
 const STATE_TAKEN: u8 = 1;
+const STATE_ABORTED: u8 = 2;
 
 struct Entry<T>
 where
@@ -53,6 +54,38 @@ where
 	value: UnsafeCell<MaybeUninit<T>>,
 }
 
+struct EntryTxGuard<'a, T>
+where
+	T: Send,
+{
+	armed: bool,
+	entry: &'a Entry<T>,
+}
+
+impl<'a, T> EntryTxGuard<'a, T>
+where
+	T: Send,
+{
+	pub fn new(entry: &'a Entry<T>) -> Self {
+		Self { armed: true, entry }
+	}
+
+	pub fn disarm(&mut self) {
+		self.armed = false;
+	}
+}
+
+impl<T> Drop for EntryTxGuard<'_, T>
+where
+	T: Send,
+{
+	fn drop(&mut self) {
+		if self.armed {
+			self.entry.state.store(STATE_ABORTED, Ordering::Release);
+		}
+	}
+}
+
 impl<T> Tx<T>
 where
 	T: Send,
@@ -60,10 +93,12 @@ where
 	pub async fn send(&self, datum: T) -> Result<()> {
 		let permit = self.shared.tx_sem.acquire().await.map_err(|_| Error::Closed)?;
 
-		let index = self.shared.buffer_tail.fetch_add(1, Ordering::Relaxed);
-		let index = index & (self.shared.buffer.len() - 1);
+		let buffer_tail = self.shared.buffer_tail.fetch_add(1, Ordering::Relaxed);
+		let index = buffer_tail & (self.shared.buffer.len() - 1);
 
 		let entry = &self.shared.buffer[index];
+
+		let mut guard = EntryTxGuard::new(entry);
 
 		let ptr: *mut MaybeUninit<T> = entry.value.get();
 		unsafe {
@@ -71,8 +106,10 @@ where
 		}
 		entry.state.store(STATE_TAKEN, Ordering::Release);
 
-		permit.forget();
 		self.shared.rx_sem.add_permits(1);
+
+		guard.disarm();
+		permit.forget();
 
 		Ok(())
 	}
@@ -119,17 +156,42 @@ where
 		self.take()
 	}
 
-	fn take(&self) -> Option<T> {
-		// only one consumer is allowed, so we can read once and increment only when we are certain.
-		let buffer_head = self.shared.buffer_head.load(Ordering::Acquire);
+	#[inline]
+	fn advance(&self) {
+		self.shared.buffer_head.fetch_add(1, Ordering::Release);
+	}
 
-		let index = buffer_head & (self.shared.buffer.len() - 1);
-		let entry = &self.shared.buffer[index];
-		if entry.state.load(Ordering::Acquire) == STATE_FREE {
-			return None;
+	#[inline]
+	fn resolve(&self) -> Option<(usize, usize)> {
+		loop {
+			let head = self.shared.buffer_head.load(Ordering::Acquire);
+			let tail = self.shared.buffer_tail.load(Ordering::Acquire);
+			if head == tail {
+				return None;
+			}
+
+			let index = head & (self.shared.buffer.len() - 1);
+
+			let entry = &self.shared.buffer[index];
+			let state = entry.state.load(Ordering::Acquire);
+			if state == STATE_FREE {
+				return None;
+			}
+			if state == STATE_ABORTED {
+				entry.state.store(STATE_FREE, Ordering::Release);
+				self.advance();
+				continue;
+			}
+
+			return Some((head, index));
 		}
+	}
 
-		self.shared.buffer_head.store(buffer_head + 1, Ordering::Release);
+	fn take(&self) -> Option<T> {
+		let (_, index) = self.resolve()?;
+		let entry = &self.shared.buffer[index];
+
+		self.advance();
 
 		let ptr: *mut MaybeUninit<T> = entry.value.get();
 		let datum = unsafe {
