@@ -93,7 +93,9 @@ where
 	T: Send,
 {
 	fn drop(&mut self) {
-		self.shared.tx_count.fetch_sub(1, Ordering::Relaxed);
+		if self.shared.tx_count.fetch_sub(1, Ordering::AcqRel) == 1 {
+			self.shared.rx_sem.close();
+		}
 	}
 }
 
@@ -101,48 +103,45 @@ impl<T> Rx<T>
 where
 	T: Send,
 {
-	pub async fn recv(&mut self) -> Result<T> {
-		// only one consumer is allowed, so we can read once and increment only when we are certain.
-		let buffer_head = self.shared.buffer_head.load(Ordering::Acquire);
-		let index = buffer_head & (self.shared.buffer.len() - 1);
+	pub async fn recv(&mut self) -> Option<T> {
+		while let Ok(permit) = self.shared.rx_sem.acquire().await {
+			if let Some(datum) = self.take() {
+				permit.forget();
+				self.shared.tx_sem.add_permits(1);
 
-		loop {
-			let permit = self.shared.rx_sem.acquire().await.map_err(|_| Error::Closed)?;
-
-			let entry = &self.shared.buffer[index];
-			if entry.state.load(Ordering::Acquire) == STATE_FREE {
-				// drop the permit, so it can be acquired again after yielding.
-				drop(permit);
-
-				// TODO Effective yield.
+				return Some(datum);
+			} else {
 				tokio::task::yield_now().await;
 				continue;
 			}
-
-			self.shared.buffer_head.store(buffer_head + 1, Ordering::Release);
-
-			let ptr: *mut MaybeUninit<T> = entry.value.get();
-			let datum = unsafe {
-				let datum = (*ptr).assume_init_read();
-				*ptr = MaybeUninit::uninit();
-
-				datum
-			};
-
-			entry.state.store(STATE_FREE, Ordering::Release);
-
-			permit.forget();
-			self.shared.tx_sem.add_permits(1);
-
-			if self.shared.tx_count.load(Ordering::Relaxed) == 0 {
-				let buffer_tail = self.shared.buffer_tail.load(Ordering::Relaxed);
-				if buffer_head == buffer_tail {
-					self.shared.rx_sem.close();
-				}
-			}
-
-			return Ok(datum);
 		}
+
+		self.take()
+	}
+
+	fn take(&self) -> Option<T> {
+		// only one consumer is allowed, so we can read once and increment only when we are certain.
+		let buffer_head = self.shared.buffer_head.load(Ordering::Acquire);
+
+		let index = buffer_head & (self.shared.buffer.len() - 1);
+		let entry = &self.shared.buffer[index];
+		if entry.state.load(Ordering::Acquire) == STATE_FREE {
+			return None;
+		}
+
+		self.shared.buffer_head.store(buffer_head + 1, Ordering::Release);
+
+		let ptr: *mut MaybeUninit<T> = entry.value.get();
+		let datum = unsafe {
+			let datum = (*ptr).assume_init_read();
+			*ptr = MaybeUninit::uninit();
+
+			datum
+		};
+
+		entry.state.store(STATE_FREE, Ordering::Release);
+
+		Some(datum)
 	}
 }
 
