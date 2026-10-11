@@ -1,3 +1,14 @@
+//! A multi-producer, single-consumer (MPSC) bounded channel implementation with an interface
+//! similar to Tokio's MPSC channel.
+//!
+//! # Overview
+//!
+//! A channel is created using the [`bounded`] function, specifying a buffer capacity.
+//! It returns a sending handle ([`Tx`]) and a receiving handle ([`Rx`]).
+//!
+//! The sender can be cloned to allow multiple tasks or threads to send values concurrently.
+//! The receiver is strictly single-consumer and requires exclusive (`&mut self`) access to receive messages.
+
 use std::cell::UnsafeCell;
 use std::mem::MaybeUninit;
 use std::sync::Arc;
@@ -6,13 +17,22 @@ use std::time::Duration;
 
 use tokio::sync::Semaphore;
 
-#[derive(Copy, Clone, Debug)]
+/// Errors that can occur when interacting with the channel.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Error {
+	/// The channel is closed.
+	///
+	/// For senders, this indicates that the receiver ([`Rx`]) has been dropped.
 	Closed,
 }
 
+/// A specialized [`Result`](std::result::Result) type for channel operations.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// The sending half of a bounded MPSC channel.
+///
+/// Senders can be cloned to send messages to the same receiver from multiple asynchronous tasks or threads.
+/// When all senders are dropped, the receiver will drain remaining messages and then observe channel closure.
 pub struct Tx<T>
 where
 	T: Send,
@@ -20,6 +40,10 @@ where
 	shared: Arc<Shared<T>>,
 }
 
+/// The receiving half of a bounded MPSC channel.
+///
+/// Only a single consumer is permitted. When all corresponding [`Tx`] senders have been dropped
+/// and all buffered messages have been received, [`recv`](Rx::recv) returns `None`.
 pub struct Rx<T>
 where
 	T: Send,
@@ -108,6 +132,9 @@ impl<T> Tx<T>
 where
 	T: Send,
 {
+	/// Sends a value across the channel, waiting asynchronously if the channel is full.
+	///
+	/// If the receiver has been dropped, this method returns [`Err(Error::Closed)`](Error::Closed).
 	pub async fn send(&self, datum: T) -> Result<()> {
 		let permit = self.shared.tx_sem.acquire().await.map_err(|_| Error::Closed)?;
 
@@ -158,6 +185,11 @@ impl<T> Rx<T>
 where
 	T: Send,
 {
+	/// Receives the next value for this receiver.
+	///
+	/// Returns:
+	/// - `Some(datum)` if a message is available (waiting asynchronously if the buffer is currently empty).
+	/// - `None` if the channel is closed and all messages sent prior to closure have been consumed.
 	pub async fn recv(&mut self) -> Option<T> {
 		let mut yielder = Yielder::default();
 
@@ -252,6 +284,14 @@ where
 	}
 }
 
+/// Creates a bounded MPSC channel with capacity for at least `n` messages.
+///
+/// Senders can be cloned and shared across tasks. If the channel is full, calls to [`Tx::send`]
+/// will asynchronously wait until capacity becomes available.
+///
+/// # Panics
+///
+/// Panics if `n == 0`.
 pub fn bounded<T>(n: usize) -> (Tx<T>, Rx<T>)
 where
 	T: Send,
