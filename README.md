@@ -119,3 +119,32 @@ Generate the API documentation:
 ```shell
 cargo doc --no-deps --open
 ```
+
+---
+
+## Benchmarks: Grachten vs Tokio MPSC
+
+Grachten includes a built-in benchmark target comparing its performance directly against `tokio::sync::mpsc::channel` across varying contention and capacity profiles.
+
+Anyone can easily execute the benchmark suite with:
+
+```shell
+cargo bench
+```
+
+### Representative Benchmark Results
+
+Measured on Linux (x86_64), taking the median over 5 samples across a multi-threaded Tokio runtime:
+
+| Scenario | Grachten (time) | Tokio (time) | Grachten Throughput | Tokio Throughput |
+|---|---|---|---|---|
+| **SPSC** (cap 64, 500k msgs) | ~34.6 ms | ~26.4 ms | **14.45 M msgs/sec** | **18.93 M msgs/sec** |
+| **SPSC** (cap 1024, 500k msgs) | ~56.2 ms | ~36.6 ms | **8.89 M msgs/sec** | **13.65 M msgs/sec** |
+| **Ping-Pong** (cap 1, 100k msgs) | ~29.4 ms | ~24.1 ms | **3.40 M msgs/sec** | **4.16 M msgs/sec** |
+| **MPSC 4 senders** (cap 64, 500k msgs) | ~88.9 ms | ~61.9 ms | **5.62 M msgs/sec** | **8.08 M msgs/sec** |
+| **MPSC 8 senders** (cap 128, 800k msgs) | ~168.5 ms | ~110.2 ms | **4.75 M msgs/sec** | **7.26 M msgs/sec** |
+| **MPSC 16 senders** (cap 256, 800k msgs) | ~205.4 ms | ~133.7 ms | **3.89 M msgs/sec** | **5.98 M msgs/sec** |
+
+#### Observations:
+- In low-contention SPSC pipelines, Grachten achieves **~14.5 million messages/sec**, reaching roughly **75% of Tokio's throughput** despite its simpler design.
+- In high-contention multi-producer scenarios (8–16 senders), Tokio's chunked linked-list design and dedicated waker list maintain a ~1.5× lead, whereas Grachten maintains a solid **3.9–4.8 million messages/sec**.
