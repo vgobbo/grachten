@@ -2,6 +2,7 @@ use std::cell::UnsafeCell;
 use std::mem::MaybeUninit;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU32, AtomicUsize, Ordering};
+use std::time::Duration;
 
 use tokio::sync::Semaphore;
 
@@ -40,6 +41,23 @@ where
 
 unsafe impl<T: Send> Send for Shared<T> {}
 unsafe impl<T: Send> Sync for Shared<T> {}
+
+#[derive(Default)]
+struct Yielder {
+	count: u32,
+}
+
+impl Yielder {
+	pub async fn pass(&mut self) {
+		match self.count {
+			0..20 => tokio::task::yield_now().await,
+			20..100 => tokio::time::sleep(Duration::from_millis(1)).await,
+			100..200 => tokio::time::sleep(Duration::from_millis(2)).await,
+			_ => tokio::time::sleep(Duration::from_millis(10)).await,
+		}
+		self.count += 1;
+	}
+}
 
 type State = AtomicU8;
 const STATE_FREE: u8 = 0;
@@ -141,6 +159,8 @@ where
 	T: Send,
 {
 	pub async fn recv(&mut self) -> Option<T> {
+		let mut yielder = Yielder::default();
+
 		while let Ok(permit) = self.shared.rx_sem.acquire().await {
 			if let Some(datum) = self.take() {
 				permit.forget();
@@ -148,7 +168,7 @@ where
 
 				return Some(datum);
 			} else {
-				tokio::task::yield_now().await;
+				yielder.pass().await;
 				continue;
 			}
 		}

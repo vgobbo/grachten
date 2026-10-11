@@ -5,4 +5,4 @@ name = "grachten"
 version = "0.0.0-NEXT"
 
 [dependencies]
-tokio = { version = "1", features = [ "rt", "sync" ] }
+tokio = { version = "1", features = [ "rt", "sync", "time" ] }
